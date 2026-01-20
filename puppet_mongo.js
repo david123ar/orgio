@@ -4,35 +4,62 @@ const axios = require("axios");
 const { MongoClient } = require("mongodb");
 const { URL } = require("url");
 
+/* =============================
+   CONFIG
+============================= */
 const API_BASE = "https://api.henpro.fun/api/episodes";
 const VIDEO_BASE = "https://watchhentai.net/videos/";
 
 const client = new MongoClient(process.env.MONGODB_URI);
 
-/* -----------------------------
-   Decode MP4 from iframe URL
--------------------------------- */
-function decodeMp4(iframeSrc) {
+/* =============================
+   Extract BEST MP4 URL
+============================= */
+function extractDirectVideoUrl(iframeSrc) {
   if (!iframeSrc) return null;
+
   try {
-    const u = new URL(iframeSrc);
-    const source = u.searchParams.get("source");
-    return source ? decodeURIComponent(source) : null;
+    const urlObj = new URL(iframeSrc);
+    const sourceParam = urlObj.searchParams.get("source");
+    if (!sourceParam) return null;
+
+    const decoded = decodeURIComponent(sourceParam);
+
+    const qualityParam = urlObj.searchParams.get("quality");
+    let highestQuality = null;
+
+    if (qualityParam) {
+      const qualities = qualityParam
+        .split(",")
+        .map(q => parseInt(q.replace("p", ""), 10))
+        .filter(Boolean)
+        .sort((a, b) => b - a);
+
+      if (qualities.length > 0) {
+        highestQuality = `${qualities[0]}p`;
+      }
+    }
+
+    if (highestQuality) {
+      return decoded.replace(/\.mp4$/, `_${highestQuality}.mp4`);
+    }
+
+    return decoded;
   } catch {
     return null;
   }
 }
 
-/* -----------------------------
-   Extract iframe + download
--------------------------------- */
+/* =============================
+   Scrape Episode Page
+============================= */
 async function scrapeEpisode(page, videoUrl) {
   await page.goto(videoUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
 
-  // wait until iframe src is real (not about:blank)
+  // Wait until iframe src is not about:blank
   await page.waitForFunction(() => {
     const iframe = document.querySelector("#search_iframe");
     if (!iframe) return false;
@@ -57,9 +84,9 @@ async function scrapeEpisode(page, videoUrl) {
   });
 }
 
-/* -----------------------------
+/* =============================
    MAIN
--------------------------------- */
+============================= */
 async function run() {
   await client.connect();
   const db = client.db(process.env.MONGODB_DB);
@@ -85,7 +112,7 @@ async function run() {
   let totalPages = 1;
 
   while (currentPage <= totalPages) {
-    console.log(`📄 Fetching API page ${currentPage}`);
+    console.log(`📄 Fetching API page ${currentPage} / ${totalPages}`);
 
     const { data } = await axios.get(`${API_BASE}?page=${currentPage}`);
     totalPages = data.totalPages;
@@ -96,17 +123,21 @@ async function run() {
 
       const exists = await collection.findOne({ episodeId });
       if (exists) {
-        console.log(`⏩ Skipped: ${episodeId}`);
+        console.log(
+          `⏩ [Page ${currentPage}/${totalPages}] Skipped: ${episodeId}`
+        );
         continue;
       }
 
-      console.log(`🎬 Scraping: ${episodeId}`);
+      console.log(
+        `🎬 [Page ${currentPage}/${totalPages}] → Episode: ${episodeId}`
+      );
 
       try {
         const { iframeSrc, downloadUrl } =
           await scrapeEpisode(page, videoPageUrl);
 
-        const videoUrl = decodeMp4(iframeSrc);
+        const videoUrl = extractDirectVideoUrl(iframeSrc);
 
         await collection.insertOne({
           episodeId,
@@ -117,9 +148,14 @@ async function run() {
           scrapedAt: new Date(),
         });
 
-        console.log(`✅ Saved: ${episodeId}`);
+        console.log(
+          `✅ [Page ${currentPage}/${totalPages}] Saved: ${episodeId}`
+        );
       } catch (err) {
-        console.error(`❌ Failed: ${episodeId}`, err.message);
+        console.error(
+          `❌ [Page ${currentPage}/${totalPages}] Failed: ${episodeId}`,
+          err.message
+        );
       }
     }
 
@@ -129,7 +165,7 @@ async function run() {
   await browser.close();
   await client.close();
 
-  console.log("🎉 DONE");
+  console.log("🎉 ALL EPISODES SCRAPED");
 }
 
 run();
